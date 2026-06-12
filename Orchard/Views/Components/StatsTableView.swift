@@ -143,7 +143,7 @@ struct StatsTableView: View {
                             VStack(alignment: .trailing, spacing: 2) {
                                 Text("\(stats.formattedMemoryUsage)")
                                     .font(.system(.caption, design: .monospaced))
-                                Text("\(String(format: "%.1f", stats.memoryUsagePercent))%")
+                                Text(stats.formattedMemoryUsagePercent)
                                     .font(.system(.caption2, design: .monospaced))
                                     .foregroundStyle(.secondary)
                             }
@@ -180,7 +180,7 @@ struct StatsTableView: View {
                                 VStack(alignment: .trailing, spacing: 2) {
                                     Text("\(stats.formattedMemoryUsage)")
                                         .font(.system(.caption, design: .monospaced))
-                                    Text("\(String(format: "%.1f", stats.memoryUsagePercent))%")
+                                    Text(stats.formattedMemoryUsagePercent)
                                         .font(.system(.caption2, design: .monospaced))
                                         .foregroundStyle(.secondary)
                                 }

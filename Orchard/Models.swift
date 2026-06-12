@@ -656,6 +656,10 @@ struct ContainerStats: Codable, Equatable, Identifiable {
         return Double(memoryUsageBytes) / Double(memoryLimitBytes) * 100.0
     }
 
+    var formattedMemoryUsagePercent: String {
+        memoryUsagePercent.formatted(.number.precision(.fractionLength(1))) + "%"
+    }
+
     var formattedMemoryUsage: String {
         ByteCountFormatter.string(fromByteCount: Int64(memoryUsageBytes), countStyle: .memory)
     }

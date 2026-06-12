@@ -538,7 +538,7 @@ struct ContainerDetailView: View {
                             .font(.subheadline)
                             .fontWeight(.semibold)
                             .fontDesign(.monospaced)
-                        Text("\(String(format: "%.1f", stats.memoryUsagePercent))%")
+                        Text(stats.formattedMemoryUsagePercent)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
