@@ -8,25 +8,45 @@ import ContainerizationExtras
 
 // MARK: - Host architecture (for picking image variant size)
 
+private func sysctlInt32Value(named name: String) -> Int32? {
+    var value: Int32 = 0
+    var size = MemoryLayout<Int32>.size
+    let result = unsafe sysctlbyname(name, &value, &size, nil, 0)
+
+    guard result == 0 else { return nil }
+    return value
+}
+
+private func sysctlStringValue(named name: String) -> String? {
+    var size = 0
+    guard unsafe sysctlbyname(name, nil, &size, nil, 0) == 0, size > 0 else {
+        return nil
+    }
+
+    var bytes = [CChar](repeating: 0, count: size)
+    guard unsafe sysctlbyname(name, &bytes, &size, nil, 0) == 0 else {
+        return nil
+    }
+
+    let stringBytes = bytes
+        .prefix(size)
+        .prefix { $0 != 0 }
+        .map { UInt8(bitPattern: $0) }
+
+    return String(decoding: stringBytes, as: UTF8.self)
+}
+
 /// Resolved at first access. Honors Rosetta: a process running translated on
 /// an Apple Silicon Mac reports its slice arch via `hw.machine` (x86_64), but
 /// the *host* is arm64 — and that's what the container runtime pulls for. So
 /// we check `sysctl.proc_translated` first.
 let hostContainerArchitecture: String = {
-    var translated: Int32 = 0
-    var size = MemoryLayout<Int32>.size
-    let rc = sysctlbyname("sysctl.proc_translated", &translated, &size, nil, 0)
-    if rc == 0 && translated == 1 {
+    if sysctlInt32Value(named: "sysctl.proc_translated") == 1 {
         return "arm64"
     }
 
-    var machineSize: Int = 0
-    sysctlbyname("hw.machine", nil, &machineSize, nil, 0)
-    guard machineSize > 0 else { return "arm64" }
-    var bytes = [CChar](repeating: 0, count: machineSize)
-    sysctlbyname("hw.machine", &bytes, &machineSize, nil, 0)
-    let raw = String(cString: bytes)
-    return raw.contains("arm64") ? "arm64" : "amd64"
+    let machine = sysctlStringValue(named: "hw.machine") ?? "arm64"
+    return machine.contains("arm64") ? "arm64" : "amd64"
 }()
 
 /// Normalizes a user-provided image reference to the canonical form
