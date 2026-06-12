@@ -2,9 +2,11 @@ import Foundation
 import SwiftUI
 import AppKit
 import ContainerAPIClient
+import ContainerPersistence
 import ContainerResource
 import ContainerizationOCI
 import ContainerizationExtras
+import SystemPackage
 
 // MARK: - Host architecture (for picking image variant size)
 
@@ -772,7 +774,7 @@ class ContainerService: ObservableObject {
 
         do {
             let client = ContainerClient()
-            try await client.kill(id: id, signal: 9)
+            try await client.kill(id: id, signal: "KILL")
 
             await MainActor.run {
                 print("Container \(id) force stop (SIGKILL) sent")
@@ -1290,18 +1292,55 @@ class ContainerService: ObservableObject {
         }.value
     }
 
+    // MARK: - System Configuration
+
+    /// Loads the container daemon's system configuration the same way the CLI does:
+    /// it resolves the app/install roots reported by the running API server, then
+    /// reads the layered TOML configuration. The image client APIs require this to
+    /// normalize registry references against the user's configured registry/DNS.
+    nonisolated private func loadSystemConfig() async throws -> ContainerSystemConfig {
+        let health = try await ClientHealthCheck.ping(timeout: .seconds(10))
+        let appRoot = FilePath(health.appRoot.path(percentEncoded: false))
+        let installRoot = FilePath(health.installRoot.path(percentEncoded: false))
+        return try await ConfigurationLoader.load(
+            configurationFiles: [
+                ConfigurationLoader.configurationFile(in: appRoot, of: .appRoot),
+                ConfigurationLoader.configurationFile(in: installRoot, of: .installRoot),
+            ]
+        )
+    }
+
     // MARK: - Image Inspection
 
     func inspectImage(reference: String) async throws -> ImageInspection {
-        let image = try await ClientImage.get(reference: reference)
-        let detail = try await image.details()
+        let containerSystemConfig = try await loadSystemConfig()
+        let image = try await ClientImage.get(reference: reference, containerSystemConfig: containerSystemConfig)
 
+        // Resolve the index and per-platform manifests/configs. The 1.0.0 client
+        // dropped the convenience `details()` accessor, so we assemble the same
+        // information from the lower-level `index()`, `manifest(for:)` and
+        // `config(for:)` calls (mirroring `ClientImage.toImageResource`).
         var variants: [ImageInspection.Variant] = []
-        for v in detail.variants {
-            let config = v.config.config
+        for desc in try await image.index().manifests {
+            guard let platform = desc.platform else { continue }
+
+            let ociImage: ContainerizationOCI.Image
+            let manifest: ContainerizationOCI.Manifest
+            do {
+                ociImage = try await image.config(for: platform)
+                manifest = try await image.manifest(for: platform)
+            } catch {
+                continue
+            }
+
+            let config = ociImage.config
+            let size =
+                desc.size + manifest.config.size
+                + manifest.layers.reduce(0) { $0 + $1.size }
+
             variants.append(ImageInspection.Variant(
-                platform: "\(v.platform.os)/\(v.platform.architecture)",
-                size: v.size,
+                platform: "\(platform.os)/\(platform.architecture)",
+                size: size,
                 entrypoint: config?.entrypoint,
                 cmd: config?.cmd,
                 env: config?.env,
@@ -1312,11 +1351,12 @@ class ContainerService: ObservableObject {
             ))
         }
 
+        let descriptor = image.descriptor
         return ImageInspection(
-            name: detail.name,
-            digest: "\(detail.index.digest)",
-            mediaType: detail.index.mediaType,
-            size: detail.index.size,
+            name: image.reference,
+            digest: image.digest,
+            mediaType: descriptor.mediaType,
+            size: descriptor.size,
             variants: variants
         )
     }
@@ -1448,10 +1488,10 @@ class ContainerService: ObservableObject {
             }
 
             let config = try NetworkConfiguration(
-                id: name,
+                name: name,
                 mode: .nat,
                 labels: try ResourceLabels(labelDict),
-                pluginInfo: NetworkPluginInfo(plugin: "container-network-vmnet")
+                plugin: "container-network-vmnet"
             )
 
             _ = try await NetworkClient().create(configuration: config)
@@ -1891,7 +1931,8 @@ class ContainerService: ObservableObject {
         }
 
         do {
-            _ = try await ClientImage.pull(reference: cleanImageName)
+            let containerSystemConfig = try await loadSystemConfig()
+            _ = try await ClientImage.pull(reference: cleanImageName, containerSystemConfig: containerSystemConfig)
 
             await MainActor.run {
                 pullProgress[cleanImageName] = ImagePullProgress(
@@ -2275,7 +2316,8 @@ class ContainerService: ObservableObject {
         autoRemove: Bool
     ) async throws {
         // Fetch or pull the image
-        let image = try await ClientImage.fetch(reference: imageRef)
+        let containerSystemConfig = try await loadSystemConfig()
+        let image = try await ClientImage.fetch(reference: imageRef, containerSystemConfig: containerSystemConfig)
         let platform = ContainerizationOCI.Platform.current
 
         // Unpack image snapshot
@@ -2389,8 +2431,8 @@ class ContainerService: ObservableObject {
             for pm in config.portMappings {
                 if let hp = UInt16(pm.hostPort), let cp = UInt16(pm.containerPort) {
                     let proto = PublishProtocol(pm.transportProtocol) ?? .tcp
-                    ports.append(PublishPort(
-                        hostAddress: try IPAddress("0.0.0.0"),
+                    ports.append(try PublishPort(
+                        hostAddress: IPAddress("0.0.0.0"),
                         hostPort: hp,
                         containerPort: cp,
                         proto: proto,
