@@ -161,7 +161,9 @@ struct LogsView: View {
     private func startLogRefresh() {
         fetchLogsAsync()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
-            fetchLogsAsync()
+            Task { @MainActor in
+                fetchLogsAsync()
+            }
         }
     }
 
