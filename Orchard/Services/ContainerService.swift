@@ -1748,45 +1748,55 @@ class ContainerService: ObservableObject {
                 return properties
             }
 
-            if let jsonArray = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                for propertyDict in jsonArray {
-                    guard let id = propertyDict["id"] as? String,
-                          let typeString = propertyDict["type"] as? String,
-                          let description = propertyDict["description"] as? String else {
-                        continue
-                    }
-
-                    // Handle value which can be null, bool, or string
-                    let valueString: String
-                    if let value = propertyDict["value"] {
-                        if value is NSNull {
-                            valueString = "*undefined*"
-                        } else if let boolValue = value as? Bool {
-                            valueString = boolValue ? "true" : "false"
-                        } else if let stringValue = value as? String {
-                            valueString = stringValue
-                        } else {
-                            valueString = String(describing: value)
-                        }
-                    } else {
-                        valueString = "*undefined*"
-                    }
-
-                    let type: SystemProperty.PropertyType = typeString.lowercased() == "bool" ? .bool : .string
-
-                    properties.append(SystemProperty(
-                        id: id,
-                        type: type,
-                        value: valueString,
-                        description: description
-                    ))
-                }
+            // container 1.0.0 returns a nested object grouped by section,
+            // e.g. {"build":{"rosetta":true,"image":"…"},"kernel":{"url":"…"}}.
+            // Flatten it into dotted ids (build.rosetta, kernel.url, …).
+            if let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                flattenSystemProperties(jsonObject, prefix: "", into: &properties)
             }
         } catch {
             print("Error parsing system properties JSON: \(error)")
         }
 
         return properties
+    }
+
+    private func flattenSystemProperties(
+        _ dict: [String: Any],
+        prefix: String,
+        into properties: inout [SystemProperty]
+    ) {
+        for (key, rawValue) in dict {
+            let id = prefix.isEmpty ? key : "\(prefix).\(key)"
+
+            if let nested = rawValue as? [String: Any] {
+                flattenSystemProperties(nested, prefix: id, into: &properties)
+                continue
+            }
+
+            let type: SystemProperty.PropertyType
+            let valueString: String
+            if rawValue is NSNull {
+                type = .string
+                valueString = "*undefined*"
+            } else if let boolValue = rawValue as? Bool {
+                type = .bool
+                valueString = boolValue ? "true" : "false"
+            } else if let stringValue = rawValue as? String {
+                type = .string
+                valueString = stringValue
+            } else {
+                type = .string
+                valueString = String(describing: rawValue)
+            }
+
+            properties.append(SystemProperty(
+                id: id,
+                type: type,
+                value: valueString,
+                description: ""
+            ))
+        }
     }
 
     func setSystemProperty(_ id: String, value: String) async {

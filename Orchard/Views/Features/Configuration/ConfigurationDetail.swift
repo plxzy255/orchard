@@ -146,25 +146,10 @@ struct ConfigurationDetailView: View {
                         .frame(width: 220, alignment: .trailing)
 
                     VStack(alignment: .leading) {
-                        let currentDomain = containerService.systemProperties.first(where: { $0.id == "dns.domain" })?.value ?? ""
-                        Picker("", selection: Binding(
-                            get: { currentDomain },
-                            set: { newValue in
-                                DispatchQueue.main.async {
-                                    Task {
-                                        await containerService.setSystemProperty("dns.domain", value: newValue)
-                                    }
-                                }
-                            }
-                        )) {
-                            ForEach(containerService.dnsDomains, id: \.domain) { domain in
-                                Text(domain.domain).tag(domain.domain)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .frame(width: 200, alignment: .leading)
-
-                        Text("If defined, the local DNS domain to use for containers with unqualified names.")
+                        TextField("", text: .constant(containerService.systemProperties.first(where: { $0.id == "dns.domain" })?.value ?? "Not set"))
+                            .textFieldStyle(.plain)
+                            .fontWeight(.medium)
+                        Text("If defined, the local DNS domain to use for containers with unqualified names. Manage domains in the DNS section.")
                             .foregroundColor(.secondary)
                     }
 
@@ -177,7 +162,7 @@ struct ConfigurationDetailView: View {
                         .frame(width: 220, alignment: .trailing)
 
                     VStack(alignment: .leading) {
-                        TextField("", text: .constant(containerService.systemProperties.first(where: { $0.id == "image.builder" })?.value ?? "Loading..."))
+                        TextField("", text: .constant(containerService.systemProperties.first(where: { $0.id == "build.image" })?.value ?? "Loading..."))
                             .textFieldStyle(.plain)
                             .fontWeight(.medium)
                             .font(.system(.body, design: .monospaced))
@@ -194,7 +179,7 @@ struct ConfigurationDetailView: View {
                         .frame(width: 220, alignment: .trailing)
 
                     VStack(alignment: .leading) {
-                        TextField("", text: .constant(containerService.systemProperties.first(where: { $0.id == "image.init" })?.value ?? "Loading..."))
+                        TextField("", text: .constant(containerService.systemProperties.first(where: { $0.id == "vminit.image" })?.value ?? "Loading..."))
                             .textFieldStyle(.plain)
                             .fontWeight(.medium)
                             .font(.system(.body, design: .monospaced))
