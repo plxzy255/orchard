@@ -2149,20 +2149,70 @@ class ContainerService: ObservableObject {
             return
         }
 
-        // Use 'open -na' to always open a new window, even if Ghostty is already running
-        // Pass the command via '/bin/sh -c' to avoid Ghostty's argument parsing issues
         let fullCommand = "'\(containerBinary)' exec -it '\(containerId)' \(shell)"
+
+        // Prefer Ghostty's native AppleScript dictionary (Ghostty 1.3+, enabled by
+        // default via macos-applescript) to open the command in a NEW TAB of the
+        // existing window. This only works when Ghostty is already running with an
+        // open window — otherwise there's no front window to add a tab to.
+        let isRunning = NSWorkspace.shared.runningApplications.contains {
+            $0.bundleIdentifier == TerminalApp.ghostty.bundleIdentifier
+        }
+
+        if isRunning, openInGhosttyTab(command: fullCommand) {
+            print("✓ Ghostty opened command in a new tab")
+            return
+        }
+
+        // Fallback: Ghostty isn't running (no window to tab into) or the AppleScript
+        // path failed (e.g. Ghostty older than 1.3, or Automation permission denied).
+        // Launch a fresh window via the CLI, passing the command through '/bin/sh -c'
+        // to avoid Ghostty's argument parsing issues.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         process.arguments = ["-na", appURL.path, "--args", "-e", "/bin/sh", "-c", fullCommand]
 
         do {
             try process.run()
-            print("✓ Ghostty opened successfully")
+            print("✓ Ghostty opened successfully (new window)")
         } catch {
             print("❌ Failed to open Ghostty: \(error)")
             self.errorMessage = "Failed to open Ghostty: \(error.localizedDescription)"
         }
+    }
+
+    /// Opens the command in a new tab of Ghostty's existing front window using its
+    /// native AppleScript API. Returns false if no window exists or the script fails,
+    /// so the caller can fall back to launching a new window.
+    private func openInGhosttyTab(command: String) -> Bool {
+        // Escape for AppleScript - replace backslashes and quotes
+        let escapedCommand = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+
+        // 'new tab in front window' adds a tab to the existing window; we then type
+        // the command into that tab's terminal and press return, mirroring how the
+        // Terminal.app path uses 'do script'.
+        let script = """
+        tell application "Ghostty"
+            activate
+            if (count of windows) is 0 then error "no open Ghostty window"
+            set newTab to new tab in front window
+            set newTerm to focused terminal of newTab
+            input text "\(escapedCommand)" to newTerm
+            send key "enter" to newTerm
+        end tell
+        """
+
+        let appleScript = NSAppleScript(source: script)
+        var error: NSDictionary?
+        appleScript?.executeAndReturnError(&error)
+
+        if let error = error {
+            print("⚠️ Ghostty AppleScript tab failed, falling back to new window: \(error)")
+            return false
+        }
+        return true
     }
 
     private func executeAppleScript(_ script: String) {
