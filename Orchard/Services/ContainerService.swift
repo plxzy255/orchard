@@ -1799,126 +1799,110 @@ class ContainerService: ObservableObject {
         }
     }
 
-    func setSystemProperty(_ id: String, value: String) async {
-        // Preserve window focus
-        let currentApp = NSApplication.shared
-        let isActive = currentApp.isActive
+    func setDefaultDNSDomain(_ domain: String) async {
+        // container 1.0.0 removed `system property set`; the default DNS domain is
+        // now configured via ~/.config/container/config.toml ([dns] domain = "…")
+        // and only takes effect after the container service is restarted.
+        let confirmed = await MainActor.run { () -> Bool in
+            let alert = NSAlert()
+            alert.messageText = "Set Default DNS Domain"
+            alert.informativeText = "Setting \"\(domain)\" as the default DNS domain updates ~/.config/container/config.toml and restarts the container service. Running containers will be briefly interrupted."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Set Default & Restart")
+            alert.addButton(withTitle: "Cancel")
+            return alert.runModal() == .alertFirstButtonReturn
+        }
+        guard confirmed else { return }
 
-        // Optimistically update the UI first
         await MainActor.run {
-            if id == "dns.domain" {
-                // Update system properties optimistically
-                if let index = self.systemProperties.firstIndex(where: { $0.id == id }) {
-                    self.systemProperties[index] = SystemProperty(
-                        id: id,
-                        type: self.systemProperties[index].type,
-                        value: value,
-                        description: self.systemProperties[index].description
-                    )
-                }
-
-                // Update DNS domains default status optimistically
-                for i in 0..<self.dnsDomains.count {
-                    self.dnsDomains[i] = DNSDomain(
-                        domain: self.dnsDomains[i].domain,
-                        isDefault: self.dnsDomains[i].domain == value
-                    )
-                }
-            }
+            isSystemLoading = true
+            errorMessage = nil
         }
 
-        var result: ProcessResult
         do {
-            // Execute command with focus preservation
-            result = try runProcess(
-                program: safeContainerBinaryPath(),
-                arguments: ["system", "property", "set", id, value])
+            try writeDefaultDNSDomainToConfig(domain)
         } catch {
-            result = ProcessResult(exitCode: -1, stdout: nil, stderr: error.localizedDescription)
-        }
-
-        // Restore focus if it was lost
-        await MainActor.run {
-            if isActive && !currentApp.isActive {
-                currentApp.activate(ignoringOtherApps: true)
-            }
-        }
-
-        if result.failed {
             await MainActor.run {
-                self.errorMessage = result.stderr ?? "Failed to set system property"
-            }
-            // Revert optimistic changes on failure
-            if id == "dns.domain" {
-                await loadSystemProperties(showLoading: false)
-                await loadDNSDomains(showLoading: false)
+                self.errorMessage = "Failed to update config file: \(error.localizedDescription)"
+                self.isSystemLoading = false
             }
             return
         }
 
-        // Success - optionally refresh in background to ensure consistency
-        DispatchQueue.global(qos: .background).async { [weak self] in
-            Task {
-                await self?.loadSystemProperties(showLoading: false)
-                if id == "dns.domain" {
-                    await self?.loadDNSDomains(showLoading: false)
-                }
+        // Restart the service so the new configuration is read at startup.
+        do {
+            _ = try runProcess(
+                program: safeContainerBinaryPath(),
+                arguments: ["system", "stop"])
+            _ = try runProcess(
+                program: safeContainerBinaryPath(),
+                arguments: ["system", "start"])
+        } catch {
+            await MainActor.run {
+                self.errorMessage = "Failed to restart container service: \(error.localizedDescription)"
+                self.isSystemLoading = false
+                self.systemStatus = .stopped
             }
+            return
         }
+
+        await MainActor.run {
+            self.isSystemLoading = false
+            self.systemStatus = .running
+        }
+
+        // Refresh from the now-restarted service so the DEFAULT badge reflects reality.
+        await loadSystemProperties(showLoading: false)
+        await loadDNSDomains(showLoading: false)
+        await loadContainers()
     }
 
-    func setDefaultDNSDomain(_ domain: String) async {
-        // Immediate UI update without subprocess for better focus handling
-        await MainActor.run {
-            // Update system properties optimistically
-            if let index = self.systemProperties.firstIndex(where: { $0.id == "dns.domain" }) {
-                self.systemProperties[index] = SystemProperty(
-                    id: "dns.domain",
-                    type: self.systemProperties[index].type,
-                    value: domain,
-                    description: self.systemProperties[index].description
-                )
-            }
+    /// Writes `[dns] domain = "<domain>"` into the user's container config file,
+    /// preserving any other settings already present.
+    private func writeDefaultDNSDomainToConfig(_ domain: String) throws {
+        let configDir = NSHomeDirectory() + "/.config/container"
+        let configPath = configDir + "/config.toml"
 
-            // Update DNS domains default status immediately
-            for i in 0..<self.dnsDomains.count {
-                self.dnsDomains[i] = DNSDomain(
-                    domain: self.dnsDomains[i].domain,
-                    isDefault: self.dnsDomains[i].domain == domain
-                )
-            }
+        try FileManager.default.createDirectory(
+            atPath: configDir, withIntermediateDirectories: true)
+
+        var lines: [String] = []
+        if let existing = try? String(contentsOfFile: configPath, encoding: .utf8) {
+            lines = existing.components(separatedBy: "\n")
         }
 
-        // Execute command in background without capturing self in a concurrently-executing closure
-        let binaryPath = self.safeContainerBinaryPath()
-        let selectedDomain = domain
-        let weakSelf = self
+        let domainLine = "domain = \"\(domain)\""
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            Task { @MainActor in
-                // Switch to a nonisolated copy to avoid capturing main-actor state in concurrent context
-                let service = weakSelf
-                do {
-                    let result = try runProcess(
-                        program: binaryPath,
-                        arguments: ["system", "property", "set", "dns.domain", selectedDomain])
-
-                    if result.failed {
-                        // Revert on failure
-                        await service.loadSystemProperties(showLoading: false)
-                        await service.loadDNSDomains(showLoading: false)
-
-                        service.errorMessage = result.stderr ?? "Failed to set default DNS domain"
-                    }
-                } catch {
-                    // Revert on error
-                    await service.loadSystemProperties(showLoading: false)
-                    await service.loadDNSDomains(showLoading: false)
-
-                    service.errorMessage = "Failed to set default DNS domain: \(error.localizedDescription)"
-                }
-            }
+        func isSectionHeader(_ line: String) -> Bool {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("[") && t.hasSuffix("]")
         }
+
+        if let dnsIndex = lines.firstIndex(where: {
+            $0.trimmingCharacters(in: .whitespaces) == "[dns]"
+        }) {
+            // Find the end of the [dns] section (next header or end of file).
+            let sectionEnd = lines[(dnsIndex + 1)...].firstIndex(where: isSectionHeader)
+                ?? lines.endIndex
+
+            if let domainKeyIndex = lines[(dnsIndex + 1)..<sectionEnd].firstIndex(where: {
+                let t = $0.trimmingCharacters(in: .whitespaces)
+                return t.hasPrefix("domain") && t.contains("=")
+            }) {
+                lines[domainKeyIndex] = domainLine
+            } else {
+                lines.insert(domainLine, at: dnsIndex + 1)
+            }
+        } else {
+            if let last = lines.last, !last.trimmingCharacters(in: .whitespaces).isEmpty {
+                lines.append("")
+            }
+            lines.append("[dns]")
+            lines.append(domainLine)
+        }
+
+        try lines.joined(separator: "\n").write(
+            toFile: configPath, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Image Pull Management
