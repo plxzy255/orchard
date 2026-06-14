@@ -916,9 +916,13 @@ class ContainerService: ObservableObject {
         }
 
         do {
+            // container 1.0.0 has no `system restart`; restart is stop + start.
             _ = try runProcess(
                 program: safeContainerBinaryPath(),
-                arguments: ["system", "restart"])
+                arguments: ["system", "stop"])
+            _ = try runProcess(
+                program: safeContainerBinaryPath(),
+                arguments: ["system", "start"])
 
             await MainActor.run {
                 self.isSystemLoading = false
